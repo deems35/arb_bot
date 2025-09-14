@@ -1,0 +1,22 @@
+api:
+  binance_api_key: ""
+  binance_api_secret: ""
+  bybit_api_key: ""
+  bybit_api_secret: ""
+
+strategy:
+  USD_PER_TRADE: 10
+  WINDOW_LEN: 100
+  LOW: 0.025
+  HIGH: 0.975
+  EXCEED: 0.005
+  REFRESH_INTERVAL: 60
+  N_PAIRS_TRADE: 3
+  MAX_CLOSED_TRADES: 10
+  SEMAPHORE_LIMIT: 10
+  ANTI_BAN_DELAY: 0.05
+  RATE_LIMIT_RPS: 20  # requests per second (REST)
+
+runtime:
+  dry_run: false
+  log_level: "INFO"
