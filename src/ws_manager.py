@@ -2,6 +2,41 @@ import asyncio
 import json
 import websockets
 from loguru import logger
+import os
+from urllib.parse import urlparse
+import socket
+
+# --- SOCKS5 proxy bootstrap (uses ALL_PROXY or all_proxy env var) ---
+# If ALL_PROXY is set like: socks5h://user:pass@host:port
+# this will configure PySocks and replace socket.socket with socks.socksocket,
+# so websockets and other libraries that use socket.socket will go through the proxy.
+_proxy = os.getenv("ALL_PROXY") or os.getenv("all_proxy")
+if _proxy:
+    try:
+        parsed = urlparse(_proxy)
+        scheme = (parsed.scheme or "").lower()
+        if scheme.startswith("socks"):
+            try:
+                import socks  # PySocks
+                sockstype = socks.SOCKS5 if "socks5" in scheme else socks.SOCKS4
+                proxy_host = parsed.hostname
+                proxy_port = parsed.port or 1080
+                proxy_user = parsed.username
+                proxy_pass = parsed.password
+                # socks5h => remote DNS (resolve on proxy)
+                rdns = "socks5h" in scheme
+                socks.set_default_proxy(sockstype, proxy_host, proxy_port, rdns, proxy_user, proxy_pass)
+                socket.socket = socks.socksocket
+                logger.info("SOCKS proxy enabled: %s://%s:%s", scheme, proxy_host, proxy_port)
+            except ImportError:
+                logger.warning("PySocks not installed — SOCKS proxy won't be used. Install PySocks in venv.")
+            except Exception as e:
+                logger.warning("Failed to enable SOCKS proxy: %s", e)
+        else:
+            logger.warning("ALL_PROXY set but scheme is not socks: %s", scheme)
+    except Exception as e:
+        logger.warning("Invalid ALL_PROXY value: %s", e)
+# --- end SOCKS5 proxy bootstrap ---
 
 
 class WSManager:
