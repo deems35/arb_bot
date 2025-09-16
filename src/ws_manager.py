@@ -27,15 +27,15 @@ if _proxy:
                 rdns = "socks5h" in scheme
                 socks.set_default_proxy(sockstype, proxy_host, proxy_port, rdns, proxy_user, proxy_pass)
                 socket.socket = socks.socksocket
-                logger.info("SOCKS proxy enabled: %s://%s:%s", scheme, proxy_host, proxy_port)
+                logger.info("SOCKS proxy enabled: {}://{}:{}", scheme, proxy_host, proxy_port)
             except ImportError:
                 logger.warning("PySocks not installed — SOCKS proxy won't be used. Install PySocks in venv.")
             except Exception as e:
-                logger.warning("Failed to enable SOCKS proxy: %s", e)
+                logger.warning("Failed to enable SOCKS proxy: {}", e)
         else:
-            logger.warning("ALL_PROXY set but scheme is not socks: %s", scheme)
+            logger.warning("ALL_PROXY set but scheme is not socks: {}", scheme)
     except Exception as e:
-        logger.warning("Invalid ALL_PROXY value: %s", e)
+        logger.warning("Invalid ALL_PROXY value: {}", e)
 # --- end SOCKS5 proxy bootstrap ---
 
 
