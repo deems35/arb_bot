@@ -4,7 +4,6 @@ loguru==0.7.3
 numpy==2.3.3
 pandas==2.3.2
 pybit==5.11.0
-PySocks==1.7.1
 pytest==8.4.2
 python-binance==1.0.29
 python-dotenv==1.1.1
