@@ -2,59 +2,6 @@ import asyncio
 import json
 import websockets
 from loguru import logger
-import os
-from urllib.parse import urlparse
-import socket
-from contextlib import contextmanager
-
-# --- SOCKS5 proxy bootstrap (uses ALL_PROXY or all_proxy env var) ---
-# If ALL_PROXY is set like: socks5h://user:pass@host:port
-# this will configure PySocks and replace socket.socket with socks.socksocket,
-# so websockets and other libraries that use socket.socket will go through the proxy.
-_proxy = os.getenv("ALL_PROXY") or os.getenv("all_proxy")
-if _proxy:
-    try:
-        parsed = urlparse(_proxy)
-        scheme = (parsed.scheme or "").lower()
-        if scheme.startswith("socks"):
-            try:
-                import socks  # PySocks
-                sockstype = socks.SOCKS5 if "socks5" in scheme else socks.SOCKS4
-                proxy_host = parsed.hostname
-                proxy_port = parsed.port or 1080
-                proxy_user = parsed.username
-                proxy_pass = parsed.password
-                # socks5h => remote DNS (resolve on proxy)
-                rdns = "socks5h" in scheme
-                socks.set_default_proxy(sockstype, proxy_host, proxy_port, rdns, proxy_user, proxy_pass)
-                socket.socket = socks.socksocket
-                logger.info("SOCKS proxy enabled: {}://{}:{}", scheme, proxy_host, proxy_port)
-            except ImportError:
-                logger.warning("PySocks not installed — SOCKS proxy won't be used. Install PySocks in venv.")
-            except Exception as e:
-                logger.warning("Failed to enable SOCKS proxy: {}", e)
-        else:
-            logger.warning("ALL_PROXY set but scheme is not socks: {}", scheme)
-    except Exception as e:
-        logger.warning("Invalid ALL_PROXY value: {}", e)
-# --- end SOCKS5 proxy bootstrap ---
-
-
-# Context manager to temporarily disable HTTP(S) proxy env vars
-@contextmanager
-def _disable_http_proxy_env():
-    keys = ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"]
-    old = {}
-    for k in keys:
-        old[k] = os.environ.pop(k, None)
-    try:
-        yield
-    finally:
-        for k, v in old.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
 
 
 class WSManager:
@@ -135,36 +82,34 @@ class WSManager:
         url = 'wss://fstream.binance.com/ws'
         while self._running:
             try:
-                # Important: disable HTTP_PROXY/HTTPS_PROXY env vars so websockets won't attempt HTTP proxy CONNECT.
-                with _disable_http_proxy_env():
-                    async with websockets.connect(url, max_size=2**23, ping_interval=20, ping_timeout=10) as ws:
-                        self._binance_ws_obj = ws
-                        logger.info('Binance ws connected')
+                async with websockets.connect(url, max_size=2**23, ping_interval=20, ping_timeout=10) as ws:
+                    self._binance_ws_obj = ws
+                    logger.info('Binance ws connected')
 
+                    try:
+                        params = [f"{b.lower()}@bookTicker" for b, y in self.active_pairs]
+                        if params:
+                            msg = {"method": "SUBSCRIBE", "params": params, "id": 1}
+                            await ws.send(json.dumps(msg))
+                            logger.debug('Binance subscribed (on connect): {}', params)
+                    except Exception:
+                        logger.exception('Error while sending initial binance subscribe')
+
+                    async for raw in ws:
                         try:
-                            params = [f"{b.lower()}@bookTicker" for b, y in self.active_pairs]
-                            if params:
-                                msg = {"method": "SUBSCRIBE", "params": params, "id": 1}
-                                await ws.send(json.dumps(msg))
-                                logger.debug('Binance subscribed (on connect): {}', params)
+                            msg = json.loads(raw)
                         except Exception:
-                            logger.exception('Error while sending initial binance subscribe')
+                            continue
 
-                        async for raw in ws:
-                            try:
-                                msg = json.loads(raw)
-                            except Exception:
-                                continue
-
-                            if 's' in msg and 'b' in msg and 'a' in msg:
-                                symbol = msg['s']
-                                pair = next(((b, y) for (b, y) in self.active_pairs if b.upper() == symbol.upper()), None)
-                                if pair:
-                                    bid = msg['b']
-                                    ask = msg['a']
-                                    await self.market_data.update((pair[0], pair[1], 'binance'), 'both', bid, ask)
-                                else:
-                                    logger.debug('Binance message for {} but no matching active pair', symbol)
+                        if 's' in msg and 'b' in msg and 'a' in msg:
+                            symbol = msg['s']
+                            pair = next(((b, y) for (b, y) in self.active_pairs if b.upper() == symbol.upper()), None)
+                            if pair:
+                                bid = msg['b']
+                                ask = msg['a']
+                                await self.market_data.update((pair[0], pair[1], 'binance'), 'both', bid, ask)
+                            else:
+                                logger.debug('Binance message for {} but no matching active pair', symbol)
 
             except asyncio.CancelledError:
                 break
@@ -178,103 +123,101 @@ class WSManager:
         url = 'wss://stream.bybit.com/v5/public/linear'
         while self._running:
             try:
-                # disable HTTP proxy env vars for the connect call
-                with _disable_http_proxy_env():
-                    async with websockets.connect(url, max_size=2**23, ping_interval=20, ping_timeout=10) as ws:
-                        self._bybit_ws_obj = ws
-                        logger.info('Bybit v5 linear ws connected')
+                async with websockets.connect(url, max_size=2**23, ping_interval=20, ping_timeout=10) as ws:
+                    self._bybit_ws_obj = ws
+                    logger.info('Bybit v5 linear ws connected')
+
+                    try:
+                        if self.active_pairs:
+                            args = [f"orderbook.1.{y}" for b, y in self.active_pairs]
+                            if args:
+                                sub_msg = {"op": "subscribe", "args": args}
+                                await ws.send(json.dumps(sub_msg))
+                                logger.debug('Bybit subscribed (on connect): {}', args)
+                    except Exception:
+                        logger.exception('Error while sending initial bybit subscribe')
+
+                    async for raw in ws:
+                        try:
+                            logger.debug('Bybit raw msg preview: {}', str(raw)[:400])
+                        except Exception:
+                            pass
 
                         try:
-                            if self.active_pairs:
-                                args = [f"orderbook.1.{y}" for b, y in self.active_pairs]
-                                if args:
-                                    sub_msg = {"op": "subscribe", "args": args}
-                                    await ws.send(json.dumps(sub_msg))
-                                    logger.debug('Bybit subscribed (on connect): {}', args)
+                            msg = json.loads(raw)
                         except Exception:
-                            logger.exception('Error while sending initial bybit subscribe')
+                            continue
 
-                        async for raw in ws:
-                            try:
-                                logger.debug('Bybit raw msg preview: {}', str(raw)[:400])
-                            except Exception:
-                                pass
+                        topic = msg.get('topic') or msg.get('topicName') or msg.get('type')
+                        data = msg.get('data') or msg.get('args') or msg.get('result') or {}
+                        if not topic or not data:
+                            continue
 
-                            try:
-                                msg = json.loads(raw)
-                            except Exception:
-                                continue
+                        parts = str(topic).split('.')
+                        if len(parts) >= 3:
+                            sym = parts[-1]
+                        else:
+                            logger.debug('Bybit topic unexpected format: {}', topic)
+                            continue
 
-                            topic = msg.get('topic') or msg.get('topicName') or msg.get('type')
-                            data = msg.get('data') or msg.get('args') or msg.get('result') or {}
-                            if not topic or not data:
-                                continue
+                        sym_norm = sym.upper()
+                        pair = next(((b, y) for (b, y) in self.active_pairs if y.upper() == sym_norm), None)
+                        if not pair:
+                            logger.debug('Bybit message for {} but no matching active pair', sym)
+                            continue
 
-                            parts = str(topic).split('.')
-                            if len(parts) >= 3:
-                                sym = parts[-1]
-                            else:
-                                logger.debug('Bybit topic unexpected format: {}', topic)
-                                continue
+                        bid = ask = None
+                        if isinstance(data, dict):
+                            if 'b' in data and isinstance(data['b'], (list, tuple)) and len(data['b']) > 0:
+                                try:
+                                    bid = data['b'][0][0]
+                                except Exception:
+                                    bid = None
+                            if 'a' in data and isinstance(data['a'], (list, tuple)) and len(data['a']) > 0:
+                                try:
+                                    ask = data['a'][0][0]
+                                except Exception:
+                                    ask = None
 
-                            sym_norm = sym.upper()
-                            pair = next(((b, y) for (b, y) in self.active_pairs if y.upper() == sym_norm), None)
-                            if not pair:
-                                logger.debug('Bybit message for {} but no matching active pair', sym)
-                                continue
+                            if bid is None and 'buy' in data and isinstance(data['buy'], (list, tuple)) and data['buy']:
+                                try:
+                                    bid = data['buy'][0][0]
+                                except Exception:
+                                    bid = None
+                            if ask is None and 'sell' in data and isinstance(data['sell'], (list, tuple)) and data['sell']:
+                                try:
+                                    ask = data['sell'][0][0]
+                                except Exception:
+                                    ask = None
 
-                            bid = ask = None
-                            if isinstance(data, dict):
-                                if 'b' in data and isinstance(data['b'], (list, tuple)) and len(data['b']) > 0:
+                            if bid is None and 'bids' in data and isinstance(data['bids'], (list, tuple)) and data['bids']:
+                                try:
+                                    bid = data['bids'][0][0]
+                                except Exception:
+                                    bid = None
+                            if ask is None and 'asks' in data and isinstance(data['asks'], (list, tuple)) and data['asks']:
+                                try:
+                                    ask = data['asks'][0][0]
+                                except Exception:
+                                    ask = None
+
+                            if (bid is None or ask is None) and 'tick' in data and isinstance(data['tick'], dict):
+                                tick = data['tick']
+                                if bid is None and 'b' in tick and tick['b']:
                                     try:
-                                        bid = data['b'][0][0]
+                                        bid = tick['b'][0][0]
                                     except Exception:
-                                        bid = None
-                                if 'a' in data and isinstance(data['a'], (list, tuple)) and len(data['a']) > 0:
+                                        pass
+                                if ask is None and 'a' in tick and tick['a']:
                                     try:
-                                        ask = data['a'][0][0]
+                                        ask = tick['a'][0][0]
                                     except Exception:
-                                        ask = None
+                                        pass
 
-                                if bid is None and 'buy' in data and isinstance(data['buy'], (list, tuple)) and data['buy']:
-                                    try:
-                                        bid = data['buy'][0][0]
-                                    except Exception:
-                                        bid = None
-                                if ask is None and 'sell' in data and isinstance(data['sell'], (list, tuple)) and data['sell']:
-                                    try:
-                                        ask = data['sell'][0][0]
-                                    except Exception:
-                                        ask = None
-
-                                if bid is None and 'bids' in data and isinstance(data['bids'], (list, tuple)) and data['bids']:
-                                    try:
-                                        bid = data['bids'][0][0]
-                                    except Exception:
-                                        bid = None
-                                if ask is None and 'asks' in data and isinstance(data['asks'], (list, tuple)) and data['asks']:
-                                    try:
-                                        ask = data['asks'][0][0]
-                                    except Exception:
-                                        ask = None
-
-                                if (bid is None or ask is None) and 'tick' in data and isinstance(data['tick'], dict):
-                                    tick = data['tick']
-                                    if bid is None and 'b' in tick and tick['b']:
-                                        try:
-                                            bid = tick['b'][0][0]
-                                        except Exception:
-                                            pass
-                                    if ask is None and 'a' in tick and tick['a']:
-                                        try:
-                                            ask = tick['a'][0][0]
-                                        except Exception:
-                                            pass
-
-                            if bid is not None and ask is not None:
-                                await self.market_data.update((pair[0], pair[1], 'bybit'), 'both', bid, ask)
-                            else:
-                                logger.debug('Bybit parsed data missing bid/ask for topic={}', topic)
+                        if bid is not None and ask is not None:
+                            await self.market_data.update((pair[0], pair[1], 'bybit'), 'both', bid, ask)
+                        else:
+                            logger.debug('Bybit parsed data missing bid/ask for topic={}', topic)
 
             except asyncio.CancelledError:
                 break
